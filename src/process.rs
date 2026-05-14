@@ -55,8 +55,11 @@ fn get_class_args(command: &str) -> (Vec<String>, String) {
             vec![format!("--app-id={QUAKE_APP_ID}")],
             QUAKE_APP_ID.to_string(),
         ),
-        // Most terminals support --class
-        "cosmic-term" | "alacritty" | "kitty" | "wezterm" => (
+        // cosmic-term is a COSMIC app and ignores --class for Wayland app_id;
+        // it always advertises its default app_id.
+        "cosmic-term" => (vec![], "com.system76.CosmicTerm".to_string()),
+        // Most terminals support --class for Wayland app_id override
+        "alacritty" | "kitty" | "wezterm" => (
             vec!["--class".into(), QUAKE_APP_ID.into()],
             QUAKE_APP_ID.to_string(),
         ),

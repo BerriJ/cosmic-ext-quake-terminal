@@ -46,6 +46,8 @@ rustPlatform.buildRustPackage rec {
           libxkbcommon
         ]
       }
+    install -Dm0644 data/com.github.m0rf30.CosmicExtQuakeTerminal.desktop \
+      $out/share/applications/com.github.m0rf30.CosmicExtQuakeTerminal.desktop
   '';
 
   meta = {

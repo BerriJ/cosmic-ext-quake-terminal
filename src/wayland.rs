@@ -53,7 +53,7 @@ struct WaylandState {
     toplevel_manager: Option<ToplevelManagerState>,
     seat_state: SeatState,
     seat: Option<WlSeat>,
-    target_app_id: String,
+    target_app_id: &'static str,
     our_handle: Option<ZcosmicToplevelHandleV1>,
     our_foreign_handle: Option<ExtForeignToplevelHandleV1>,
     event_tx: tokio_mpsc::UnboundedSender<ToplevelEvent>,
@@ -232,7 +232,7 @@ cosmic_client_toolkit::delegate_toplevel_info!(WaylandState);
 cosmic_client_toolkit::delegate_toplevel_manager!(WaylandState);
 
 fn run_wayland_loop(
-    target_app_id: String,
+    target_app_id: &'static str,
     event_tx: tokio_mpsc::UnboundedSender<ToplevelEvent>,
     cmd_rx: std_mpsc::Receiver<WaylandCommand>,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -318,7 +318,7 @@ fn handle_command_inner(state: &WaylandState, cmd: WaylandCommand) {
     }
 }
 
-pub fn toplevel_subscription(target_app_id: String) -> cosmic::iced::Subscription<ToplevelEvent> {
+pub fn toplevel_subscription(target_app_id: &'static str) -> cosmic::iced::Subscription<ToplevelEvent> {
     struct ToplevelSub;
 
     cosmic::iced::Subscription::run_with_id(
@@ -352,6 +352,6 @@ pub fn toplevel_subscription(target_app_id: String) -> cosmic::iced::Subscriptio
 }
 
 enum ToplevelSubState {
-    Init(String),
+    Init(&'static str),
     Running(tokio_mpsc::UnboundedReceiver<ToplevelEvent>),
 }

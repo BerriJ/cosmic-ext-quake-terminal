@@ -2,12 +2,12 @@
 
 A quake-style dropdown terminal for [COSMIC Desktop](https://github.com/pop-os/cosmic-epoch).
 
-Runs as a background daemon and toggles a terminal emulator's visibility via a keyboard shortcut, similar to Guake, Yakuake, or the Quake console.
+Runs as a background daemon and toggles `cosmic-term`'s visibility via a keyboard shortcut, similar to Guake, Yakuake, or the Quake console.
 
 ## How it works
 
 - Runs as a background daemon with no visible window
-- On first toggle, spawns your configured terminal emulator
+- On first toggle, spawns `cosmic-term`
 - Subsequent toggles hide (minimize) or show (activate + focus) the terminal
 - Uses COSMIC's Wayland toplevel management protocol (`zcosmic_toplevel_manager_v1`) for window control
 - D-Bus activation handles IPC between the CLI toggle command and the running daemon
@@ -36,42 +36,52 @@ sudo just install
 sudo just uninstall
 ```
 
-## Configuration
+## Required cosmic-comp setup — make the terminal float
 
-Configuration is stored at `~/.config/cosmic/com.github.m0rf30.CosmicExtQuakeTerminal/v1/` using COSMIC's config system.
+If you use cosmic-comp's **tiling** layout, the spawned `cosmic-term` window will be placed into the tiling layout by default, which defeats the Quake-style dropdown. To prevent this, add an application exception so cosmic-comp always treats `cosmic-term` as floating.
 
-### Setting the terminal emulator
+### Via cosmic-settings (GUI)
 
-Write the terminal binary name to the config file:
+1. Open **Settings → Desktop → Window management → Window rules**.
+2. Add a new application exception:
+   - **Application ID:** `com.system76.CosmicTerm`
+   - **Title:** leave empty
+3. Save. New `cosmic-term` windows will now open floating.
 
-```sh
-# Use ghostty
-mkdir -p ~/.config/cosmic/com.github.m0rf30.CosmicExtQuakeTerminal/v1
-echo '"ghostty"' > ~/.config/cosmic/com.github.m0rf30.CosmicExtQuakeTerminal/v1/terminal_command
+### By editing the config file
 
-# Or use cosmic-term (default)
-echo '"cosmic-term"' > ~/.config/cosmic/com.github.m0rf30.CosmicExtQuakeTerminal/v1/terminal_command
+Append an entry to `~/.config/cosmic/com.system76.CosmicSettings.WindowRules/v1/tiling_exception_defaults`. The file is a RON list of `ApplicationException { appid, title }` entries (both are regex strings):
+
+```ron
+[
+    (appid: "com.system76.CosmicTerm", title: ""),
+]
 ```
 
-Changes are picked up automatically without restarting the daemon.
+After the rule is in place, cosmic-comp will remember the floating window's geometry per-application — position and resize the dropdown once and subsequent toggles will reuse that geometry.
 
-### Supported terminals
+### Trade-offs
 
-| Terminal | Notes |
-|----------|-------|
-| `cosmic-term` | Default. Uses `--class` for window identification. |
-| `ghostty` | Spawns with `--gtk-single-instance=false` to avoid joining existing instances. Tracked via its default `com.mitchellh.ghostty` app ID. |
-| `alacritty` | Uses `--class` for window identification. |
-| `kitty` | Uses `--class` for window identification. |
-| `foot` | Uses `--app-id` for window identification. |
-| `wezterm` | Uses `--class` for window identification. |
-| Other | Falls back to `--class`. May work if the terminal supports it. |
+This daemon spawns `cosmic-term` as a regular Wayland toplevel and controls it via the toplevel-management protocol. Without a layer-shell surface, the following are **not** possible from this app:
+
+- Forcing a specific size, position, or monitor
+- Always-on-top / show-on-all-workspaces
+- Slide-down / slide-up animation
+
+These require an embedded terminal widget rendered into a layer-shell surface, which is a future direction for the project.
+
+## Configuration
+
+Configuration is stored at `~/.config/cosmic/com.github.m0rf30.CosmicExtQuakeTerminal/v2/` using COSMIC's config system.
 
 ### Additional terminal arguments
 
 ```sh
-echo '["--some-flag", "value"]' > ~/.config/cosmic/com.github.m0rf30.CosmicExtQuakeTerminal/v1/terminal_args
+mkdir -p ~/.config/cosmic/com.github.m0rf30.CosmicExtQuakeTerminal/v2
+echo '["--some-flag", "value"]' > ~/.config/cosmic/com.github.m0rf30.CosmicExtQuakeTerminal/v2/terminal_args
 ```
+
+Changes are picked up automatically without restarting the daemon. The same setting is also exposed in the in-app Settings window (`cosmic-ext-quake-terminal settings`).
 
 ## Keyboard shortcut
 

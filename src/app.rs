@@ -6,27 +6,16 @@ use cosmic::app::{Core, Settings, Task};
 use cosmic::cosmic_config::{self, CosmicConfigEntry};
 use cosmic::iced::event::{self, Event};
 use cosmic::iced::window;
-use cosmic::iced::Alignment;
 use cosmic::iced::Length;
 use cosmic::iced::Subscription;
-use cosmic::widget::{self, container, header_bar, scrollable, settings, text, text_input};
+use cosmic::widget::{container, header_bar, scrollable, settings, text, text_input};
 use cosmic::{Application, ApplicationExt, Element};
 use serde::{Deserialize, Serialize};
 
 use crate::config::{QuakeConfig, CONFIG_VERSION};
 use crate::fl;
-use crate::process;
+use crate::process::{self, TERMINAL_APP_ID};
 use crate::wayland::{self, ToplevelEvent, WaylandController};
-
-/// (command, display_name, icon_name)
-const KNOWN_TERMINALS: &[(&str, &str, &str)] = &[
-    ("cosmic-term", "cosmic-terminal", "com.system76.CosmicTerm"),
-    ("alacritty", "alacritty", "Alacritty"),
-    ("kitty", "kitty", "kitty"),
-    ("foot", "foot", "foot"),
-    ("wezterm", "wezterm", "org.wezfurlong.wezterm"),
-    ("ghostty", "ghostty", "com.mitchellh.ghostty"),
-];
 
 const APP_ID: &str = "com.github.m0rf30.CosmicExtQuakeTerminal";
 
@@ -94,7 +83,6 @@ pub enum Message {
     WindowOpened(window::Id),
     WindowClosed(window::Id),
     CloseWindow(window::Id),
-    SetTerminalCommand(usize),
     SetTerminalArgs(String),
 }
 
@@ -106,7 +94,6 @@ pub struct QuakeTerminal {
     focused: bool,
     refocusing: bool,
     terminal_pid: Option<Arc<AtomicU32>>,
-    terminal_app_id: String,
     wayland_controller: Option<WaylandController>,
     settings_window_id: Option<window::Id>,
 }
@@ -125,9 +112,6 @@ impl Application for QuakeTerminal {
             .and_then(|h| QuakeConfig::get_entry(h).ok())
             .unwrap_or_default();
 
-        // Pre-compute the app_id for the configured terminal
-        let terminal_app_id = process::get_app_id(&config.terminal_command);
-
         let app = Self {
             core,
             config,
@@ -136,7 +120,6 @@ impl Application for QuakeTerminal {
             focused: false,
             refocusing: false,
             terminal_pid: None,
-            terminal_app_id,
             wayland_controller: None,
             settings_window_id: None,
         };
@@ -179,7 +162,6 @@ impl Application for QuakeTerminal {
             }
             Message::ConfigChanged(config) => {
                 tracing::info!("Config changed");
-                self.terminal_app_id = process::get_app_id(&config.terminal_command);
                 self.config = config;
             }
             Message::OpenSettings => {
@@ -209,13 +191,6 @@ impl Application for QuakeTerminal {
                     self.settings_window_id = None;
                 }
             }
-            Message::SetTerminalCommand(index) => {
-                if let Some(&(command, _, _)) = KNOWN_TERMINALS.get(index) {
-                    if let Some(ref handler) = self.config_handler {
-                        let _ = self.config.set_terminal_command(handler, command.into());
-                    }
-                }
-            }
             Message::SetTerminalArgs(args_str) => {
                 let args: Vec<String> = if args_str.trim().is_empty() {
                     Vec::new()
@@ -240,32 +215,16 @@ impl Application for QuakeTerminal {
             return text("").into();
         }
 
-        let terminal_index = self.terminal_index();
-
-        let mut terminal_section = settings::section().title(fl!("settings-terminal"));
-
-        for (i, &(_, display_name, icon_name)) in KNOWN_TERMINALS.iter().enumerate() {
-            let icon = widget::icon::from_name(icon_name).size(24).prefer_svg(true);
-            let label = widget::row::with_children(vec![icon.into(), text(display_name).into()])
-                .spacing(12)
-                .align_y(Alignment::Center);
-
-            terminal_section = terminal_section.add(widget::radio(
-                label,
-                i,
-                Some(terminal_index),
-                Message::SetTerminalCommand,
-            ));
-        }
-
-        let terminal_section = terminal_section.add(settings::item(
-            fl!("terminal-args"),
-            text_input(
-                fl!("terminal-args-placeholder"),
-                self.config.terminal_args.join(" "),
-            )
-            .on_input(Message::SetTerminalArgs),
-        ));
+        let terminal_section = settings::section().title(fl!("settings-terminal")).add(
+            settings::item(
+                fl!("terminal-args"),
+                text_input(
+                    fl!("terminal-args-placeholder"),
+                    self.config.terminal_args.join(" "),
+                )
+                .on_input(Message::SetTerminalArgs),
+            ),
+        );
 
         let content = settings::view_column(vec![terminal_section.into()]).padding([0, 24]);
 
@@ -273,7 +232,7 @@ impl Application for QuakeTerminal {
             .title(fl!("settings-title"))
             .on_close(Message::CloseWindow(id));
 
-        container(widget::column().push(header).push(scrollable(content)))
+        container(cosmic::widget::column().push(header).push(scrollable(content)))
             .class(cosmic::style::Container::Background)
             .width(Length::Fill)
             .height(Length::Fill)
@@ -281,7 +240,7 @@ impl Application for QuakeTerminal {
     }
 
     fn subscription(&self) -> Subscription<Self::Message> {
-        let mut subs = vec![wayland::toplevel_subscription(self.terminal_app_id.clone())
+        let mut subs = vec![wayland::toplevel_subscription(TERMINAL_APP_ID)
             .map(Message::ToplevelEvent)];
 
         // Monitor terminal process exit via kill(pid, 0)
@@ -362,25 +321,14 @@ impl Application for QuakeTerminal {
 }
 
 impl QuakeTerminal {
-    fn terminal_index(&self) -> usize {
-        KNOWN_TERMINALS
-            .iter()
-            .position(|&(cmd, _, _)| cmd == self.config.terminal_command)
-            .unwrap_or(0)
-    }
-
     fn handle_toggle(&mut self) {
         match self.state {
             ToggleState::Idle => {
                 tracing::info!("Toggle: spawning terminal");
-                let result = process::spawn_terminal(
-                    &self.config.terminal_command,
-                    &self.config.terminal_args,
-                );
+                let result = process::spawn_terminal(&self.config.terminal_args);
                 if let Some(result) = result {
                     let pid = result.pid;
                     self.terminal_pid = Some(Arc::new(AtomicU32::new(pid)));
-                    self.terminal_app_id = result.app_id;
                     self.state = ToggleState::WaitingForWindow;
                 }
             }

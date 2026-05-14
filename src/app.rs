@@ -90,8 +90,9 @@ pub enum Message {
 /// Number of `activate` retries we issue while trying to claim focus after a
 /// show toggle. A child app launched from the terminal will often try to
 /// reclaim focus immediately after the terminal becomes visible; each retry
-/// gives the compositor another chance to honor our request.
-const MAX_FOCUS_RETRIES: u8 = 6;
+/// gives the compositor another chance to honor our request. With the
+/// 150 ms tick this gives a ~1.5 s window for focus to settle.
+const MAX_FOCUS_RETRIES: u8 = 10;
 
 pub struct QuakeTerminal {
     core: Core,
@@ -416,25 +417,37 @@ impl QuakeTerminal {
         if !self.focus_pending {
             return;
         }
-        if self.focused {
-            // Activated event already landed; nothing to do.
-            self.focus_pending = false;
-            self.focus_retries = 0;
-            return;
-        }
         if self.focus_retries >= MAX_FOCUS_RETRIES {
-            tracing::warn!(
-                "Focus retry: giving up after {} attempts",
-                self.focus_retries
+            // Retry budget exhausted. Stop the retry loop. If focus never
+            // landed, the next user toggle will try again.
+            tracing::debug!(
+                "Focus retry: budget exhausted after {} attempts (focused={})",
+                self.focus_retries,
+                self.focused
             );
             self.focus_pending = false;
             self.focus_retries = 0;
             return;
         }
         self.focus_retries += 1;
-        tracing::debug!("Focus retry: attempt {}", self.focus_retries);
-        if let Some(ref controller) = self.wayland_controller {
-            controller.activate();
+        // Always re-issue activate if we don't currently hold focus,
+        // even if a previous `Activated` event already arrived: the
+        // compositor may have bounced focus back to the previously-focused
+        // app, and we want to claim it back. If we DO currently hold focus
+        // the activate is a cheap no-op.
+        if !self.focused {
+            tracing::debug!(
+                "Focus retry: attempt {} (not focused)",
+                self.focus_retries
+            );
+            if let Some(ref controller) = self.wayland_controller {
+                controller.activate();
+            }
+        } else {
+            tracing::trace!(
+                "Focus retry: attempt {} (already focused, holding)",
+                self.focus_retries
+            );
         }
     }
 
@@ -474,10 +487,16 @@ impl QuakeTerminal {
                 if self.terminal_pid.is_some() {
                     self.state = ToggleState::Visible;
                     self.focused = true;
-                    // Focus has actually landed on the terminal; stop the
-                    // retry loop.
-                    self.focus_pending = false;
-                    self.focus_retries = 0;
+                    // NOTE: we deliberately do NOT clear `focus_pending`
+                    // here. After a show toggle the compositor sometimes
+                    // briefly activates us and then bounces focus back to
+                    // the previously-focused app (the one launched from
+                    // the terminal). Keeping `focus_pending` armed for the
+                    // full retry budget lets the retry tick re-issue
+                    // `activate` until focus actually sticks, and keeps
+                    // `Deactivated` from triggering auto-hide in the
+                    // meantime. The retry tick clears `focus_pending`
+                    // once the budget is exhausted.
                 }
             }
             ToplevelEvent::Deactivated => {

@@ -13,11 +13,9 @@ use smithay_client_toolkit::registry::{ProvidesRegistryState, RegistryState};
 use smithay_client_toolkit::seat::{Capability, SeatHandler, SeatState};
 use tokio::sync::mpsc as tokio_mpsc;
 use wayland_client::globals::registry_queue_init;
-use wayland_client::protocol::wl_output::WlOutput;
 use wayland_client::protocol::wl_seat::WlSeat;
 use wayland_client::{Connection, QueueHandle, WEnum};
 use wayland_protocols::ext::foreign_toplevel_list::v1::client::ext_foreign_toplevel_handle_v1::ExtForeignToplevelHandleV1;
-use wayland_protocols::ext::workspace::v1::client::ext_workspace_handle_v1;
 
 #[derive(Debug, Clone)]
 pub enum ToplevelEvent {
@@ -140,6 +138,17 @@ impl ToplevelInfoHandler for WaylandState {
                 self.our_foreign_handle = Some(toplevel.clone());
                 self.last_minimized = None;
                 self.last_activated = None;
+
+                // Make the terminal sticky so it appears on every workspace.
+                // This is what Quake-style dropdowns expect and avoids having
+                // to (unreliably) relocate a minimized window between
+                // workspaces every time the user toggles it.
+                if let (Some(ref h), Some(ref mgr)) =
+                    (&self.our_handle, &self.toplevel_manager)
+                {
+                    mgr.manager.set_sticky(h);
+                }
+
                 let _ = self.event_tx.send(ToplevelEvent::Found);
             }
         }
@@ -325,43 +334,15 @@ fn handle_command_inner(state: &WaylandState, cmd: WaylandCommand) {
             manager.set_minimized(handle);
         }
         WaylandCommand::Activate => {
-            // Unminimize first: COSMIC won't relocate a minimized toplevel,
-            // so a move_to_ext_workspace call on a hidden window is silently
-            // ignored and the terminal stays on its original workspace.
+            // The terminal is made sticky in new_toplevel, so it follows the
+            // user across workspaces automatically. We just need to unminimize
+            // it and activate it on the current seat.
             manager.unset_minimized(handle);
-
-            // Move the terminal to the currently active workspace so that
-            // pressing the toggle on a different workspace brings it here
-            // instead of switching us to whichever workspace it last lived on.
-            if let Some((ws_handle, output)) = find_active_workspace(state) {
-                tracing::debug!("Moving terminal to active workspace before activate");
-                manager.move_to_ext_workspace(handle, &ws_handle, &output);
-            } else {
-                tracing::debug!("No active workspace found, skipping move_to_ext_workspace");
-            }
             if let Some(ref seat) = state.seat {
                 manager.activate(handle, seat);
             }
         }
     }
-}
-
-fn find_active_workspace(
-    state: &WaylandState,
-) -> Option<(ext_workspace_handle_v1::ExtWorkspaceHandleV1, WlOutput)> {
-    for ws in state.workspace_state.workspaces() {
-        if !ws.state.contains(ext_workspace_handle_v1::State::Active) {
-            continue;
-        }
-        for group in state.workspace_state.workspace_groups() {
-            if group.workspaces.contains(&ws.handle) {
-                if let Some(output) = group.outputs.first() {
-                    return Some((ws.handle.clone(), output.clone()));
-                }
-            }
-        }
-    }
-    None
 }
 
 pub fn toplevel_subscription(target_app_id: &'static str) -> cosmic::iced::Subscription<ToplevelEvent> {

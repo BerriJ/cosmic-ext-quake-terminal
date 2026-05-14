@@ -84,7 +84,14 @@ pub enum Message {
     WindowClosed(window::Id),
     CloseWindow(window::Id),
     SetTerminalArgs(String),
+    FocusRetry,
 }
+
+/// Number of `activate` retries we issue while trying to claim focus after a
+/// show toggle. A child app launched from the terminal will often try to
+/// reclaim focus immediately after the terminal becomes visible; each retry
+/// gives the compositor another chance to honor our request.
+const MAX_FOCUS_RETRIES: u8 = 6;
 
 pub struct QuakeTerminal {
     core: Core,
@@ -93,6 +100,11 @@ pub struct QuakeTerminal {
     state: ToggleState,
     focused: bool,
     refocusing: bool,
+    /// True while we are actively trying to claim keyboard focus on the
+    /// terminal (between a show toggle and the moment focus has settled).
+    /// While this is set, `Deactivated` events do not trigger auto-hide.
+    focus_pending: bool,
+    focus_retries: u8,
     terminal_pid: Option<Arc<AtomicU32>>,
     wayland_controller: Option<WaylandController>,
     settings_window_id: Option<window::Id>,
@@ -119,6 +131,8 @@ impl Application for QuakeTerminal {
             state: ToggleState::Idle,
             focused: false,
             refocusing: false,
+            focus_pending: false,
+            focus_retries: 0,
             terminal_pid: None,
             wayland_controller: None,
             settings_window_id: None,
@@ -201,6 +215,7 @@ impl Application for QuakeTerminal {
                     let _ = self.config.set_terminal_args(handler, args);
                 }
             }
+            Message::FocusRetry => self.handle_focus_retry(),
         }
         Task::none()
     }
@@ -263,6 +278,19 @@ impl Application for QuakeTerminal {
                             }
                         }
                     }
+                }),
+            ));
+        }
+
+        // Focus-retry ticker: while we're trying to claim focus after a
+        // show toggle, fire a FocusRetry message every 150ms so the update
+        // loop can re-issue activate until focus actually lands on us.
+        if self.focus_pending {
+            subs.push(cosmic::iced::Subscription::run_with_id(
+                "focus-retry",
+                futures::stream::unfold((), |()| async move {
+                    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+                    Some((Message::FocusRetry, ()))
                 }),
             ));
         }
@@ -343,28 +371,70 @@ impl QuakeTerminal {
                     }
                     self.state = ToggleState::Hidden;
                     self.focused = false;
+                    // User explicitly hid the terminal — stop any pending
+                    // focus-retry loop that may still be running.
+                    self.focus_pending = false;
+                    self.focus_retries = 0;
                 } else {
                     tracing::info!("Toggle: refocusing terminal (minimize first)");
                     if let Some(ref controller) = self.wayland_controller {
                         controller.minimize();
                     }
                     self.refocusing = true;
+                    // Arm the focus-retry loop so that if the launched child
+                    // app reclaims focus right after we reactivate, we keep
+                    // trying instead of letting auto-hide fire.
+                    self.focus_pending = true;
+                    self.focus_retries = 0;
                 }
             }
             ToggleState::Hidden => {
                 tracing::info!("Toggle: showing terminal");
-                // Guard against a spurious Deactivated arriving between our
-                // activate() request and the compositor actually transferring
-                // focus to the terminal. Without this, when focus is held by
-                // an app the terminal previously launched, the auto-hide path
-                // fires immediately and the terminal disappears again.
-                self.refocusing = true;
+                // Arm focus-retry BEFORE sending activate. The compositor may
+                // briefly activate then deactivate the terminal as a child
+                // app reclaims focus; the retry loop (driven by the
+                // focus-retry subscription) will keep re-issuing activate
+                // until focus actually settles on us or we hit the retry cap.
+                self.focus_pending = true;
+                self.focus_retries = 0;
                 if let Some(ref controller) = self.wayland_controller {
                     controller.activate();
                 }
                 self.state = ToggleState::Visible;
-                self.focused = true;
+                // Do NOT optimistically set focused=true here: we want the
+                // retry loop to keep firing until the real Activated event
+                // arrives from the compositor.
             }
+        }
+    }
+
+    /// Driven by the `focus-retry` subscription. Re-issues an `activate`
+    /// request while we still believe focus has not landed on the terminal.
+    /// This is what defeats the race where a child app launched from the
+    /// terminal reclaims focus immediately after we activate.
+    fn handle_focus_retry(&mut self) {
+        if !self.focus_pending {
+            return;
+        }
+        if self.focused {
+            // Activated event already landed; nothing to do.
+            self.focus_pending = false;
+            self.focus_retries = 0;
+            return;
+        }
+        if self.focus_retries >= MAX_FOCUS_RETRIES {
+            tracing::warn!(
+                "Focus retry: giving up after {} attempts",
+                self.focus_retries
+            );
+            self.focus_pending = false;
+            self.focus_retries = 0;
+            return;
+        }
+        self.focus_retries += 1;
+        tracing::debug!("Focus retry: attempt {}", self.focus_retries);
+        if let Some(ref controller) = self.wayland_controller {
+            controller.activate();
         }
     }
 
@@ -390,7 +460,10 @@ impl QuakeTerminal {
                         if let Some(ref controller) = self.wayland_controller {
                             controller.activate();
                         }
-                        self.focused = true;
+                        // Leave focused=false: the Activated event will set it
+                        // truthfully and clear focus_pending. Setting it
+                        // optimistically here would short-circuit the retry
+                        // loop before focus actually lands on the terminal.
                     } else {
                         self.state = ToggleState::Hidden;
                         self.focused = false;
@@ -401,17 +474,26 @@ impl QuakeTerminal {
                 if self.terminal_pid.is_some() {
                     self.state = ToggleState::Visible;
                     self.focused = true;
-                    // Focus has settled on the terminal — clear the guard so
-                    // subsequent focus loss can trigger auto-hide normally.
-                    self.refocusing = false;
+                    // Focus has actually landed on the terminal; stop the
+                    // retry loop.
+                    self.focus_pending = false;
+                    self.focus_retries = 0;
                 }
             }
             ToplevelEvent::Deactivated => {
                 if self.terminal_pid.is_some() {
                     self.focused = false;
-                    // Auto-hide when the terminal loses focus (e.g. user launched
-                    // an app from it and that app stole focus). Skip while we're
-                    // intentionally cycling focus via the refocus flow.
+                    // While the retry loop is active, do NOT auto-hide. The
+                    // compositor may briefly deactivate us as a child app
+                    // (launched from the terminal) reclaims focus; the
+                    // retry tick will re-issue activate.
+                    if self.focus_pending {
+                        return;
+                    }
+                    // Auto-hide when the terminal loses focus (e.g. user
+                    // launched an app from it and that app stole focus).
+                    // Skip while we're intentionally cycling focus via the
+                    // refocus flow.
                     if self.state == ToggleState::Visible && !self.refocusing {
                         tracing::info!("Auto-hide: terminal lost focus, minimizing");
                         if let Some(ref controller) = self.wayland_controller {
@@ -425,6 +507,8 @@ impl QuakeTerminal {
                 tracing::info!("Terminal window closed by compositor");
                 self.state = ToggleState::Idle;
                 self.focused = false;
+                self.focus_pending = false;
+                self.focus_retries = 0;
                 if let Some(pid) = self.terminal_pid.take() {
                     let raw = pid.load(Ordering::Relaxed) as i32;
                     let nix_pid = nix::unistd::Pid::from_raw(raw);

@@ -353,6 +353,12 @@ impl QuakeTerminal {
             }
             ToggleState::Hidden => {
                 tracing::info!("Toggle: showing terminal");
+                // Guard against a spurious Deactivated arriving between our
+                // activate() request and the compositor actually transferring
+                // focus to the terminal. Without this, when focus is held by
+                // an app the terminal previously launched, the auto-hide path
+                // fires immediately and the terminal disappears again.
+                self.refocusing = true;
                 if let Some(ref controller) = self.wayland_controller {
                     controller.activate();
                 }
@@ -395,6 +401,9 @@ impl QuakeTerminal {
                 if self.terminal_pid.is_some() {
                     self.state = ToggleState::Visible;
                     self.focused = true;
+                    // Focus has settled on the terminal — clear the guard so
+                    // subsequent focus loss can trigger auto-hide normally.
+                    self.refocusing = false;
                 }
             }
             ToplevelEvent::Deactivated => {

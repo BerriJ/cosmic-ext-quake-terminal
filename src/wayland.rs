@@ -325,6 +325,11 @@ fn handle_command_inner(state: &WaylandState, cmd: WaylandCommand) {
             manager.set_minimized(handle);
         }
         WaylandCommand::Activate => {
+            // Unminimize first: COSMIC won't relocate a minimized toplevel,
+            // so a move_to_ext_workspace call on a hidden window is silently
+            // ignored and the terminal stays on its original workspace.
+            manager.unset_minimized(handle);
+
             // Move the terminal to the currently active workspace so that
             // pressing the toggle on a different workspace brings it here
             // instead of switching us to whichever workspace it last lived on.
@@ -334,7 +339,6 @@ fn handle_command_inner(state: &WaylandState, cmd: WaylandCommand) {
             } else {
                 tracing::debug!("No active workspace found, skipping move_to_ext_workspace");
             }
-            manager.unset_minimized(handle);
             if let Some(ref seat) = state.seat {
                 manager.activate(handle, seat);
             }

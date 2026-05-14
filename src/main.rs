@@ -2,6 +2,7 @@ mod app;
 mod config;
 mod i18n;
 mod process;
+mod tiling_exception;
 mod wayland;
 
 use cosmic::Application;
@@ -15,6 +16,7 @@ fn main() -> cosmic::iced::Result {
         env!("CARGO_PKG_VERSION")
     );
     i18n::localize();
+    tiling_exception::ensure(process::TERMINAL_APP_ID);
     app::run()
 }
 

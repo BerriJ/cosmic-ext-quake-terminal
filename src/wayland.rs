@@ -3,6 +3,7 @@ use std::sync::mpsc as std_mpsc;
 
 use cosmic_client_toolkit::toplevel_info::{ToplevelInfoHandler, ToplevelInfoState};
 use cosmic_client_toolkit::toplevel_management::{ToplevelManagerHandler, ToplevelManagerState};
+use cosmic_client_toolkit::workspace::{WorkspaceHandler, WorkspaceState};
 use cosmic_protocols::toplevel_info::v1::client::zcosmic_toplevel_handle_v1::{
     self, ZcosmicToplevelHandleV1,
 };
@@ -12,9 +13,11 @@ use smithay_client_toolkit::registry::{ProvidesRegistryState, RegistryState};
 use smithay_client_toolkit::seat::{Capability, SeatHandler, SeatState};
 use tokio::sync::mpsc as tokio_mpsc;
 use wayland_client::globals::registry_queue_init;
+use wayland_client::protocol::wl_output::WlOutput;
 use wayland_client::protocol::wl_seat::WlSeat;
 use wayland_client::{Connection, QueueHandle, WEnum};
 use wayland_protocols::ext::foreign_toplevel_list::v1::client::ext_foreign_toplevel_handle_v1::ExtForeignToplevelHandleV1;
+use wayland_protocols::ext::workspace::v1::client::ext_workspace_handle_v1;
 
 #[derive(Debug, Clone)]
 pub enum ToplevelEvent {
@@ -51,6 +54,7 @@ struct WaylandState {
     registry: RegistryState,
     toplevel_info: ToplevelInfoState,
     toplevel_manager: Option<ToplevelManagerState>,
+    workspace_state: WorkspaceState,
     seat_state: SeatState,
     seat: Option<WlSeat>,
     target_app_id: &'static str,
@@ -230,6 +234,15 @@ smithay_client_toolkit::delegate_registry!(WaylandState);
 smithay_client_toolkit::delegate_seat!(WaylandState);
 cosmic_client_toolkit::delegate_toplevel_info!(WaylandState);
 cosmic_client_toolkit::delegate_toplevel_manager!(WaylandState);
+cosmic_client_toolkit::delegate_workspace!(WaylandState);
+
+impl WorkspaceHandler for WaylandState {
+    fn workspace_state(&mut self) -> &mut WorkspaceState {
+        &mut self.workspace_state
+    }
+
+    fn done(&mut self) {}
+}
 
 fn run_wayland_loop(
     target_app_id: &'static str,
@@ -244,6 +257,7 @@ fn run_wayland_loop(
     let seat_state = SeatState::new(&globals, &qh);
     let toplevel_info = ToplevelInfoState::new(&registry, &qh);
     let toplevel_manager = ToplevelManagerState::try_new(&registry, &qh);
+    let workspace_state = WorkspaceState::new(&registry, &qh);
 
     if toplevel_manager.is_none() {
         tracing::warn!("Toplevel manager not available - minimize/activate won't work");
@@ -253,6 +267,7 @@ fn run_wayland_loop(
         registry,
         toplevel_info,
         toplevel_manager,
+        workspace_state,
         seat_state,
         seat: None,
         target_app_id,
@@ -310,12 +325,39 @@ fn handle_command_inner(state: &WaylandState, cmd: WaylandCommand) {
             manager.set_minimized(handle);
         }
         WaylandCommand::Activate => {
+            // Move the terminal to the currently active workspace so that
+            // pressing the toggle on a different workspace brings it here
+            // instead of switching us to whichever workspace it last lived on.
+            if let Some((ws_handle, output)) = find_active_workspace(state) {
+                tracing::debug!("Moving terminal to active workspace before activate");
+                manager.move_to_ext_workspace(handle, &ws_handle, &output);
+            } else {
+                tracing::debug!("No active workspace found, skipping move_to_ext_workspace");
+            }
             manager.unset_minimized(handle);
             if let Some(ref seat) = state.seat {
                 manager.activate(handle, seat);
             }
         }
     }
+}
+
+fn find_active_workspace(
+    state: &WaylandState,
+) -> Option<(ext_workspace_handle_v1::ExtWorkspaceHandleV1, WlOutput)> {
+    for ws in state.workspace_state.workspaces() {
+        if !ws.state.contains(ext_workspace_handle_v1::State::Active) {
+            continue;
+        }
+        for group in state.workspace_state.workspace_groups() {
+            if group.workspaces.contains(&ws.handle) {
+                if let Some(output) = group.outputs.first() {
+                    return Some((ws.handle.clone(), output.clone()));
+                }
+            }
+        }
+    }
+    None
 }
 
 pub fn toplevel_subscription(target_app_id: &'static str) -> cosmic::iced::Subscription<ToplevelEvent> {

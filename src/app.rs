@@ -400,6 +400,16 @@ impl QuakeTerminal {
             ToplevelEvent::Deactivated => {
                 if self.terminal_pid.is_some() {
                     self.focused = false;
+                    // Auto-hide when the terminal loses focus (e.g. user launched
+                    // an app from it and that app stole focus). Skip while we're
+                    // intentionally cycling focus via the refocus flow.
+                    if self.state == ToggleState::Visible && !self.refocusing {
+                        tracing::info!("Auto-hide: terminal lost focus, minimizing");
+                        if let Some(ref controller) = self.wayland_controller {
+                            controller.minimize();
+                        }
+                        self.state = ToggleState::Hidden;
+                    }
                 }
             }
             ToplevelEvent::Closed => {
